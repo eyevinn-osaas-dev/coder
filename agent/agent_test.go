@@ -508,8 +508,10 @@ func TestAgent_Stats_Magic(t *testing.T) {
 			remotePort := sc.Text()
 
 			sink := testutil.NewFakeSink(t)
+			logger := slog.Make(sink).Leveled(slog.LevelInfo).FlightRecorder(1)
+			logger.Debug(ctx, "making sure there is at least one debug log")
 			conn, agentClient, stats, _, agnt := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
-				o.Logger = sink.Logger()
+				o.Logger = logger
 			})
 			sshClient, err := conn.SSHClient(ctx)
 			require.NoError(t, err)
@@ -543,6 +545,7 @@ func TestAgent_Stats_Magic(t *testing.T) {
 					},
 				)
 				requireDisconnectLog(t, sink, "JetBrains channel closed", "", codersdk.DisconnectReasonServerShutdown)
+				requireDebugFlushed(t, sink, codersdk.DisconnectReasonServerShutdown)
 				return
 			}
 
