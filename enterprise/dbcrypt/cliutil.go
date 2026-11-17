@@ -10,6 +10,7 @@ import (
 
 	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
 )
 
 // Rotate rotates the database encryption keys by re-encrypting all user tokens
@@ -261,6 +262,11 @@ func Rotate(ctx context.Context, log slog.Logger, sqlDB *sql.DB, ciphers []Ciphe
 		return err
 	}
 
+	log.Info(ctx, "encrypting workspace build provisioner state")
+	if err := rewriteWorkspaceBuildStates(ctx, log, cryptDB, ciphers[0].HexDigest()); err != nil {
+		return err
+	}
+
 	// Revoke old keys
 	for _, c := range ciphers[1:] {
 		if err := db.RevokeDBCryptKey(ctx, c.HexDigest()); err != nil {
@@ -506,6 +512,11 @@ func Decrypt(ctx context.Context, log slog.Logger, sqlDB *sql.DB, ciphers []Ciph
 		return err
 	}
 
+	log.Info(ctx, "decrypting workspace build provisioner state")
+	if err := rewriteWorkspaceBuildStates(ctx, log, cryptDB, ""); err != nil {
+		return err
+	}
+
 	// Revoke _all_ keys
 	for _, c := range ciphers {
 		if err := db.RevokeDBCryptKey(ctx, c.HexDigest()); err != nil {
@@ -520,6 +531,52 @@ func Decrypt(ctx context.Context, log slog.Logger, sqlDB *sql.DB, ciphers []Ciph
 // workspaceSecretsPageSize bounds how many workspace secrets Rotate and
 // Decrypt hold in memory at once.
 const workspaceSecretsPageSize = 1000
+
+// keyIDPageSize bounds how many rows Rotate and Decrypt list at once when
+// they look up the key each value is stored with.
+const keyIDPageSize = 100
+
+// rewriteWorkspaceBuildStates saves the provisioner state of every workspace
+// build again through cryptDB, which stores it with wantKeyID. Builds whose
+// state is already stored with wantKeyID are skipped. Rotate passes the digest
+// of the primary cipher. Decrypt passes "", because it stores values
+// unencrypted.
+func rewriteWorkspaceBuildStates(ctx context.Context, log slog.Logger, cryptDB database.Store, wantKeyID string) error {
+	afterID := uuid.Nil
+	for {
+		page, err := cryptDB.GetWorkspaceBuildProvisionerStateKeyIDs(ctx, database.GetWorkspaceBuildProvisionerStateKeyIDsParams{
+			AfterID:    afterID,
+			LimitCount: keyIDPageSize,
+		})
+		if err != nil {
+			return xerrors.Errorf("list workspace builds with provisioner state after id=%s: %w", afterID, err)
+		}
+		for _, build := range page {
+			if build.ProvisionerStateKeyID.String == wantKeyID {
+				log.Debug(ctx, "skipping workspace build provisioner state", slog.F("build_id", build.ID), slog.F("key_id", wantKeyID))
+				continue
+			}
+			state, err := cryptDB.GetWorkspaceBuildProvisionerStateByID(ctx, build.ID)
+			if err != nil {
+				return xerrors.Errorf("get provisioner state for build %s: %w", build.ID, err)
+			}
+			err = cryptDB.UpdateWorkspaceBuildProvisionerStateByID(ctx, database.UpdateWorkspaceBuildProvisionerStateByIDParams{
+				ID:                    build.ID,
+				UpdatedAt:             dbtime.Now(),
+				ProvisionerState:      state.ProvisionerState,
+				ProvisionerStateKeyID: sql.NullString{}, // Set by cryptDB.
+			})
+			if err != nil {
+				return xerrors.Errorf("rewrite provisioner state for build %s: %w", build.ID, err)
+			}
+			log.Debug(ctx, "rewrote workspace build provisioner state", slog.F("build_id", build.ID), slog.F("key_id", wantKeyID))
+		}
+		if len(page) < keyIDPageSize {
+			return nil
+		}
+		afterID = page[len(page)-1].ID
+	}
+}
 
 // forEachWorkspaceSecret calls fn for every workspace secret that still holds
 // a value, one page at a time.
@@ -578,6 +635,13 @@ UPDATE ai_providers
 	SET settings = NULL,
 		settings_key_id = NULL
 	WHERE settings_key_id IS NOT NULL;
+-- Terraform state cannot be recovered without the encryption keys. Clear it
+-- rather than leaving unreadable ciphertext; affected workspaces must be
+-- rebuilt and may leave orphaned cloud resources behind.
+UPDATE workspace_builds
+	SET provisioner_state = NULL,
+		provisioner_state_key_id = NULL
+	WHERE provisioner_state_key_id IS NOT NULL;
 DELETE FROM ai_provider_keys
 	WHERE api_key_key_id IS NOT NULL;
 COMMIT;

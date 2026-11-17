@@ -4112,6 +4112,14 @@ func (m queryMetricsStore) GetWorkspaceBuildProvisionerStateByID(ctx context.Con
 	return r0, r1
 }
 
+func (m queryMetricsStore) GetWorkspaceBuildProvisionerStateKeyIDs(ctx context.Context, arg database.GetWorkspaceBuildProvisionerStateKeyIDsParams) ([]database.GetWorkspaceBuildProvisionerStateKeyIDsRow, error) {
+	start := time.Now()
+	r0, r1 := m.s.GetWorkspaceBuildProvisionerStateKeyIDs(ctx, arg)
+	m.queryLatencies.WithLabelValues("GetWorkspaceBuildProvisionerStateKeyIDs").Observe(time.Since(start).Seconds())
+	m.queryCounts.WithLabelValues(httpmw.ExtractHTTPRoute(ctx), httpmw.ExtractHTTPMethod(ctx), "GetWorkspaceBuildProvisionerStateKeyIDs").Inc()
+	return r0, r1
+}
+
 func (m queryMetricsStore) GetWorkspaceBuildStatsByTemplates(ctx context.Context, since time.Time) ([]database.GetWorkspaceBuildStatsByTemplatesRow, error) {
 	start := time.Now()
 	r0, r1 := m.s.GetWorkspaceBuildStatsByTemplates(ctx, since)

@@ -1172,6 +1172,11 @@ type sqlcQuerier interface {
 	// Provisioner state contains sensitive Terraform state and should only be
 	// accessible to template administrators.
 	GetWorkspaceBuildProvisionerStateByID(ctx context.Context, workspaceBuildID uuid.UUID) (GetWorkspaceBuildProvisionerStateByIDRow, error)
+	// Returns a page of workspace builds that hold provisioner state across the
+	// deployment, ordered by id, along with the key each state is stored with.
+	// Pass the last returned id as after_id to fetch the next page. Used only by
+	// the dbcrypt key rotation utility.
+	GetWorkspaceBuildProvisionerStateKeyIDs(ctx context.Context, arg GetWorkspaceBuildProvisionerStateKeyIDsParams) ([]GetWorkspaceBuildProvisionerStateKeyIDsRow, error)
 	GetWorkspaceBuildStatsByTemplates(ctx context.Context, since time.Time) ([]GetWorkspaceBuildStatsByTemplatesRow, error)
 	GetWorkspaceBuildsByWorkspaceID(ctx context.Context, arg GetWorkspaceBuildsByWorkspaceIDParams) ([]WorkspaceBuild, error)
 	GetWorkspaceBuildsCreatedAfter(ctx context.Context, createdAt time.Time) ([]WorkspaceBuild, error)

@@ -5426,6 +5426,11 @@ func (s *MethodTestSuite) TestSystemFunctions() {
 		dbm.EXPECT().GetWorkspaceBuildsCreatedAfter(gomock.Any(), ts).Return([]database.WorkspaceBuild{}, nil).AnyTimes()
 		check.Args(ts).Asserts(rbac.ResourceSystem, policy.ActionRead)
 	}))
+	s.Run("GetWorkspaceBuildProvisionerStateKeyIDs", s.Mocked(func(dbm *dbmock.MockStore, _ *gofakeit.Faker, check *expects) {
+		arg := database.GetWorkspaceBuildProvisionerStateKeyIDsParams{AfterID: uuid.New(), LimitCount: 100}
+		dbm.EXPECT().GetWorkspaceBuildProvisionerStateKeyIDs(gomock.Any(), arg).Return([]database.GetWorkspaceBuildProvisionerStateKeyIDsRow{}, nil).AnyTimes()
+		check.Args(arg).Asserts(rbac.ResourceSystem, policy.ActionRead)
+	}))
 	s.Run("GetWorkspaceBuildParametersByBuildIDsAndNames", s.Mocked(func(dbm *dbmock.MockStore, _ *gofakeit.Faker, check *expects) {
 		arg := database.GetWorkspaceBuildParametersByBuildIDsAndNamesParams{
 			WorkspaceBuildIds: []uuid.UUID{uuid.New()},

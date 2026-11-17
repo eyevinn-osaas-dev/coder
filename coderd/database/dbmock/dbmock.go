@@ -7750,6 +7750,21 @@ func (mr *MockStoreMockRecorder) GetWorkspaceBuildProvisionerStateByID(ctx, work
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetWorkspaceBuildProvisionerStateByID", reflect.TypeOf((*MockStore)(nil).GetWorkspaceBuildProvisionerStateByID), ctx, workspaceBuildID)
 }
 
+// GetWorkspaceBuildProvisionerStateKeyIDs mocks base method.
+func (m *MockStore) GetWorkspaceBuildProvisionerStateKeyIDs(ctx context.Context, arg database.GetWorkspaceBuildProvisionerStateKeyIDsParams) ([]database.GetWorkspaceBuildProvisionerStateKeyIDsRow, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetWorkspaceBuildProvisionerStateKeyIDs", ctx, arg)
+	ret0, _ := ret[0].([]database.GetWorkspaceBuildProvisionerStateKeyIDsRow)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetWorkspaceBuildProvisionerStateKeyIDs indicates an expected call of GetWorkspaceBuildProvisionerStateKeyIDs.
+func (mr *MockStoreMockRecorder) GetWorkspaceBuildProvisionerStateKeyIDs(ctx, arg any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetWorkspaceBuildProvisionerStateKeyIDs", reflect.TypeOf((*MockStore)(nil).GetWorkspaceBuildProvisionerStateKeyIDs), ctx, arg)
+}
+
 // GetWorkspaceBuildStatsByTemplates mocks base method.
 func (m *MockStore) GetWorkspaceBuildStatsByTemplates(ctx context.Context, since time.Time) ([]database.GetWorkspaceBuildStatsByTemplatesRow, error) {
 	m.ctrl.T.Helper()
