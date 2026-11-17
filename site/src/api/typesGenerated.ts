@@ -8089,6 +8089,23 @@ export interface OrganizationAISpendDetailsFilter {
 
 // From codersdk/aibridge.go
 /**
+ * OrganizationAISpendDimension is a user's AI spend for one model or client.
+ */
+export interface OrganizationAISpendDimension {
+	readonly name: string;
+	/**
+	 * CostMicros is the priced spend over the period.
+	 */
+	readonly cost_micros: number;
+	/**
+	 * HasUnpricedUsage reports whether any token usage was recorded without a
+	 * price.
+	 */
+	readonly has_unpriced_usage: boolean;
+}
+
+// From codersdk/aibridge.go
+/**
  * OrganizationAISpendFilter narrows the organization per-user AI spend
  * report. Zero values apply no filter: the period falls back to the current
  * budget period on the server, and an empty dimension matches all usage.
@@ -8100,6 +8117,14 @@ export interface OrganizationAISpendFilter {
 	 */
 	readonly period_start?: string;
 	readonly period_end?: string;
+	/**
+	 * UserIDs restricts the report to these users.
+	 */
+	readonly user_ids?: readonly string[];
+	/**
+	 * GroupID matches the effective group recorded on the token usage.
+	 */
+	readonly group_id?: string;
 	/**
 	 * ProviderName matches the configured provider name recorded on the
 	 * intercepted request.
@@ -8215,6 +8240,39 @@ export interface OrganizationAISpendPage {
 
 // From codersdk/aibridge.go
 /**
+ * OrganizationAISpendProvider is a user's AI spend through one configured
+ * provider.
+ */
+export interface OrganizationAISpendProvider {
+	/**
+	 * Name is the name of the configured provider.
+	 */
+	readonly name: string;
+	/**
+	 * DisplayName falls back to the provider name when unset.
+	 */
+	readonly display_name: string;
+	/**
+	 * Icon is empty when the provider has no configured icon.
+	 */
+	readonly icon: string;
+	/**
+	 * Type is omitted when the provider name was never configured.
+	 */
+	readonly type?: AIProviderType;
+	/**
+	 * CostMicros is the priced spend through the provider over the period.
+	 */
+	readonly cost_micros: number;
+	/**
+	 * HasUnpricedUsage reports whether any token usage through the provider
+	 * was recorded without a price.
+	 */
+	readonly has_unpriced_usage: boolean;
+}
+
+// From codersdk/aibridge.go
+/**
  * OrganizationAISpendReport is one page of per-user AI spend for an
  * organization over the applied period. Count and Totals cover every
  * matching user, not only the returned page.
@@ -8248,10 +8306,10 @@ export interface OrganizationAISpendTotals {
 	 */
 	readonly cost_micros: number;
 	/**
-	 * UnpricedUsageCount is the number of token usage records without a cost
-	 * across every matching user.
+	 * HasUnpricedUsage reports whether any matching token usage was recorded
+	 * without a price.
 	 */
-	readonly unpriced_usage_count: number;
+	readonly has_unpriced_usage: boolean;
 }
 
 // From codersdk/aibridge.go
@@ -8269,24 +8327,26 @@ export interface OrganizationAISpendUser {
 	 */
 	readonly cost_micros: number;
 	/**
-	 * UnpricedUsageCount is the number of the user's token usage records that
-	 * carry no cost because their model had no price when they were recorded.
+	 * UnpricedModelCount is the number of models the user spent through with
+	 * token usage recorded without a price, so CostMicros is a lower bound when
+	 * it is above zero. A model used through several providers counts once.
 	 */
-	readonly unpriced_usage_count: number;
+	readonly unpriced_model_count: number;
 	/**
-	 * Providers are the configured provider names the user spent through,
-	 * sorted.
+	 * ProviderSpend is the user's spend per configured provider, most
+	 * expensive first.
 	 */
-	readonly providers: readonly string[];
+	readonly provider_spend: readonly OrganizationAISpendProvider[];
 	/**
-	 * Clients are the clients the user spent through, sorted. Usage without a
-	 * recorded client is reported as Unknown.
+	 * ModelSpend is the user's spend per model across all providers, most
+	 * expensive first.
 	 */
-	readonly clients: readonly string[];
+	readonly model_spend: readonly OrganizationAISpendDimension[];
 	/**
-	 * Models are the models the user spent through, sorted.
+	 * ClientSpend is the user's spend per client, most expensive first. Usage
+	 * without a recorded client is reported as Unknown.
 	 */
-	readonly models: readonly string[];
+	readonly client_spend: readonly OrganizationAISpendDimension[];
 }
 
 // From codersdk/chats.go

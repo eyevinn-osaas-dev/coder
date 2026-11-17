@@ -21517,15 +21517,19 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 	vscode := sql.NullString{String: "vscode", Valid: true}
 	cursor := sql.NullString{String: "cursor", Valid: true}
 	for _, u := range []usage{
-		// alice: 1500 priced plus one unpriced usage without a recorded client.
+		// alice: 1500 priced, plus unpriced usage of gpt-4o through two
+		// providers and of o3 from two hours in.
 		{user: alice, group: inGroup, at: start, providerName: "anthropic-prod", model: "claude", client: vscode, cost: priced(1000)},
 		{user: alice, group: uuid.NullUUID{UUID: secondGroup.ID, Valid: true}, at: start.Add(time.Hour), providerName: "openai-prod", model: "gpt-4", cost: priced(500)},
 		{user: alice, group: inGroup, at: start.Add(2 * time.Hour), providerName: "openai-prod", model: "gpt-4o"},
+		{user: alice, group: inGroup, at: start.Add(2 * time.Hour), providerName: "anthropic-prod", model: "gpt-4o", client: vscode},
+		{user: alice, group: inGroup, at: start.Add(2 * time.Hour), providerName: "openai-prod", model: "o3"},
 		// bob: the most expensive user.
 		{user: bob, group: inGroup, at: start.Add(time.Hour), providerName: "anthropic-prod", model: "claude", client: cursor, cost: priced(3000)},
 		// carol ties with alice on cost and sorts after her by username.
 		{user: carol, group: inGroup, at: start.Add(time.Hour), providerName: "anthropic-prod", model: "claude", client: cursor, cost: priced(1500)},
-		{user: dave, group: inGroup, at: start.Add(time.Hour), providerName: "anthropic-prod", model: "claude", cost: priced(100)},
+		// dave spent through a provider that was never configured.
+		{user: dave, group: inGroup, at: start.Add(time.Hour), providerName: "legacy-prod", model: "claude", cost: priced(100)},
 		// Excluded: before the window, at the exclusive end, without an
 		// effective group, and attributed to another organization.
 		{user: bob, group: inGroup, at: start.Add(-time.Second), providerName: "anthropic-prod", model: "claude", cost: priced(99_999)},
@@ -21548,13 +21552,73 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 		})
 	}
 
-	row := func(user database.User, providers, clients, models []string, cost, unpriced, count, totalCost, totalUnpriced int64) database.ListOrganizationAISpendUsersRow {
-		return database.ListOrganizationAISpendUsersRow{
-			UserID: user.ID, Username: user.Username, Name: user.Name, AvatarURL: user.AvatarURL, OrganizationID: org.ID,
-			CostMicros: cost, UnpricedUsageCount: unpriced, Providers: providers, Clients: clients, Models: models,
-			Count: count, TotalCostMicros: totalCost, TotalUnpricedUsageCount: totalUnpriced,
+	// spend is one provider, model, or client of a user.
+	type spend struct {
+		name     string
+		cost     int64
+		unpriced bool
+	}
+	type userSpend struct {
+		id             uuid.UUID
+		cost           int64
+		unpricedModels int64
+		providers      []spend
+		models         []spend
+		clients        []spend
+	}
+	type report struct {
+		count     int64
+		totalCost int64
+		unpriced  bool
+		users     []userSpend
+	}
+	// collect groups the rows by user, keeping their order, so each case
+	// reads like the report the endpoint returns.
+	collect := func(rows []database.ListOrganizationAISpendUsersRow) report {
+		var r report
+		for _, row := range rows {
+			r.count, r.totalCost, r.unpriced = row.Count, row.TotalCostMicros, row.TotalHasUnpricedUsage
+			if len(r.users) == 0 || r.users[len(r.users)-1].id != row.UserID {
+				r.users = append(r.users, userSpend{id: row.UserID, cost: row.CostMicros, unpricedModels: row.UnpricedModelCount})
+			}
+			u := &r.users[len(r.users)-1]
+			s := spend{name: row.DimensionName, cost: row.DimensionCostMicros, unpriced: row.DimensionHasUnpricedUsage}
+			switch row.Dimension {
+			case "provider":
+				u.providers = append(u.providers, s)
+			case "model":
+				u.models = append(u.models, s)
+			case "client":
+				u.clients = append(u.clients, s)
+			}
+		}
+		return r
+	}
+	// only builds a user who spent through a single provider, model, and
+	// client.
+	only := func(user database.User, providerName, model, client string, cost int64) userSpend {
+		return userSpend{
+			id: user.ID, cost: cost,
+			providers: []spend{{name: providerName, cost: cost}},
+			models:    []spend{{name: model, cost: cost}},
+			clients:   []spend{{name: client, cost: cost}},
 		}
 	}
+	aliceAll := userSpend{
+		id: alice.ID, cost: 1500, unpricedModels: 2,
+		providers: []spend{{name: "anthropic-prod", cost: 1000, unpriced: true}, {name: "openai-prod", cost: 500, unpriced: true}},
+		models:    []spend{{name: "claude", cost: 1000}, {name: "gpt-4", cost: 500}, {name: "gpt-4o", unpriced: true}, {name: "o3", unpriced: true}},
+		clients:   []spend{{name: "vscode", cost: 1000, unpriced: true}, {name: "Unknown", cost: 500, unpriced: true}},
+	}
+	aliceOpenAI := userSpend{
+		id: alice.ID, cost: 500, unpricedModels: 2,
+		providers: []spend{{name: "openai-prod", cost: 500, unpriced: true}},
+		models:    []spend{{name: "gpt-4", cost: 500}, {name: "gpt-4o", unpriced: true}, {name: "o3", unpriced: true}},
+		clients:   []spend{{name: "Unknown", cost: 500, unpriced: true}},
+	}
+	bobAll := only(bob, "anthropic-prod", "claude", "cursor", 3000)
+	carolAll := only(carol, "anthropic-prod", "claude", "cursor", 1500)
+	daveAll := only(dave, "legacy-prod", "claude", "Unknown", 100)
 	base := database.ListOrganizationAISpendUsersParams{OrganizationID: org.ID, PeriodStart: start, PeriodEnd: end}
 
 	t.Run("AllUsers", func(t *testing.T) {
@@ -21562,12 +21626,10 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 		ctx := testutil.Context(t, testutil.WaitLong)
 		rows, err := db.ListOrganizationAISpendUsers(ctx, base)
 		require.NoError(t, err)
-		require.Equal(t, []database.ListOrganizationAISpendUsersRow{
-			row(bob, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 3000, 0, 4, 6100, 1),
-			row(alice, []string{"anthropic-prod", "openai-prod"}, []string{"Unknown", "vscode"}, []string{"claude", "gpt-4", "gpt-4o"}, 1500, 1, 4, 6100, 1),
-			row(carol, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 1500, 0, 4, 6100, 1),
-			row(dave, []string{"anthropic-prod"}, []string{"Unknown"}, []string{"claude"}, 100, 0, 4, 6100, 1),
-		}, rows)
+		require.Equal(t, report{
+			count: 4, totalCost: 6100, unpriced: true,
+			users: []userSpend{bobAll, aliceAll, carolAll, daveAll},
+		}, collect(rows))
 	})
 
 	t.Run("Pagination", func(t *testing.T) {
@@ -21578,18 +21640,18 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 		rows, err := db.ListOrganizationAISpendUsers(ctx, params)
 		require.NoError(t, err)
 		// Count and totals cover every matching user, not only the page.
-		require.Equal(t, []database.ListOrganizationAISpendUsersRow{
-			row(bob, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 3000, 0, 4, 6100, 1),
-			row(alice, []string{"anthropic-prod", "openai-prod"}, []string{"Unknown", "vscode"}, []string{"claude", "gpt-4", "gpt-4o"}, 1500, 1, 4, 6100, 1),
-		}, rows)
+		require.Equal(t, report{
+			count: 4, totalCost: 6100, unpriced: true,
+			users: []userSpend{bobAll, aliceAll},
+		}, collect(rows))
 
 		params.OffsetOpt = 2
 		rows, err = db.ListOrganizationAISpendUsers(ctx, params)
 		require.NoError(t, err)
-		require.Equal(t, []database.ListOrganizationAISpendUsersRow{
-			row(carol, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 1500, 0, 4, 6100, 1),
-			row(dave, []string{"anthropic-prod"}, []string{"Unknown"}, []string{"claude"}, 100, 0, 4, 6100, 1),
-		}, rows)
+		require.Equal(t, report{
+			count: 4, totalCost: 6100, unpriced: true,
+			users: []userSpend{carolAll, daveAll},
+		}, collect(rows))
 
 		params.OffsetOpt = 4
 		rows, err = db.ListOrganizationAISpendUsers(ctx, params)
@@ -21602,39 +21664,50 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 		cases := []struct {
 			name   string
 			mutate func(*database.ListOrganizationAISpendUsersParams)
-			want   []database.ListOrganizationAISpendUsersRow
+			want   report
 		}{
+			{
+				name:   "UserIDs",
+				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.UserIds = []uuid.UUID{carol.ID, dave.ID} },
+				want:   report{count: 2, totalCost: 1600, users: []userSpend{carolAll, daveAll}},
+			},
+			{
+				// Only alice's gpt-4 usage is attributed to the second group.
+				name:   "GroupID",
+				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.GroupID = secondGroup.ID },
+				want:   report{count: 1, totalCost: 500, users: []userSpend{only(alice, "openai-prod", "gpt-4", "Unknown", 500)}},
+			},
+			{
+				// A group of another organization matches no usage in this one.
+				name:   "OtherOrganizationGroup",
+				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.GroupID = otherGroup.ID },
+				want:   report{},
+			},
 			{
 				name:   "ProviderName",
 				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.ProviderName = "openai-prod" },
-				want:   []database.ListOrganizationAISpendUsersRow{row(alice, []string{"openai-prod"}, []string{"Unknown"}, []string{"gpt-4", "gpt-4o"}, 500, 1, 1, 500, 1)},
+				want:   report{count: 1, totalCost: 500, unpriced: true, users: []userSpend{aliceOpenAI}},
 			},
 			{
 				name:   "Model",
 				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.Model = "claude" },
-				want: []database.ListOrganizationAISpendUsersRow{
-					row(bob, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 3000, 0, 4, 5600, 0),
-					row(carol, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 1500, 0, 4, 5600, 0),
-					row(alice, []string{"anthropic-prod"}, []string{"vscode"}, []string{"claude"}, 1000, 0, 4, 5600, 0),
-					row(dave, []string{"anthropic-prod"}, []string{"Unknown"}, []string{"claude"}, 100, 0, 4, 5600, 0),
-				},
+				want: report{count: 4, totalCost: 5600, users: []userSpend{
+					bobAll,
+					carolAll,
+					only(alice, "anthropic-prod", "claude", "vscode", 1000),
+					daveAll,
+				}},
 			},
 			{
 				name:   "Client",
 				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.Client = "cursor" },
-				want: []database.ListOrganizationAISpendUsersRow{
-					row(bob, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 3000, 0, 2, 4500, 0),
-					row(carol, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 1500, 0, 2, 4500, 0),
-				},
+				want:   report{count: 2, totalCost: 4500, users: []userSpend{bobAll, carolAll}},
 			},
 			{
 				// A missing client is reported as Unknown, like the sessions list.
 				name:   "UnknownClient",
 				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.Client = "Unknown" },
-				want: []database.ListOrganizationAISpendUsersRow{
-					row(alice, []string{"openai-prod"}, []string{"Unknown"}, []string{"gpt-4", "gpt-4o"}, 500, 1, 2, 600, 1),
-					row(dave, []string{"anthropic-prod"}, []string{"Unknown"}, []string{"claude"}, 100, 0, 2, 600, 1),
-				},
+				want:   report{count: 2, totalCost: 600, unpriced: true, users: []userSpend{aliceOpenAI, daveAll}},
 			},
 			{
 				name: "Combined",
@@ -21643,12 +21716,12 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 					p.Model = "claude"
 					p.Client = "vscode"
 				},
-				want: []database.ListOrganizationAISpendUsersRow{row(alice, []string{"anthropic-prod"}, []string{"vscode"}, []string{"claude"}, 1000, 0, 1, 1000, 0)},
+				want: report{count: 1, totalCost: 1000, users: []userSpend{only(alice, "anthropic-prod", "claude", "vscode", 1000)}},
 			},
 			{
 				name:   "NoMatch",
 				mutate: func(p *database.ListOrganizationAISpendUsersParams) { p.Model = "missing" },
-				want:   nil,
+				want:   report{},
 			},
 		}
 		for _, tc := range cases {
@@ -21659,7 +21732,7 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 				ctx := testutil.Context(t, testutil.WaitLong)
 				rows, err := db.ListOrganizationAISpendUsers(ctx, params)
 				require.NoError(t, err)
-				require.Equal(t, tc.want, rows)
+				require.Equal(t, tc.want, collect(rows))
 			})
 		}
 	})
@@ -21669,18 +21742,23 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 		cases := []struct {
 			name       string
 			start, end time.Time
-			want       []database.ListOrganizationAISpendUsersRow
+			want       report
 		}{
 			{
 				// Only alice's unpriced usage is recorded from two hours in.
 				name: "LaterStart", start: start.Add(2 * time.Hour), end: end,
-				want: []database.ListOrganizationAISpendUsersRow{row(alice, []string{"openai-prod"}, []string{"Unknown"}, []string{"gpt-4o"}, 0, 1, 1, 0, 1)},
+				want: report{count: 1, unpriced: true, users: []userSpend{{
+					id: alice.ID, unpricedModels: 2,
+					providers: []spend{{name: "anthropic-prod", unpriced: true}, {name: "openai-prod", unpriced: true}},
+					models:    []spend{{name: "gpt-4o", unpriced: true}, {name: "o3", unpriced: true}},
+					clients:   []spend{{name: "Unknown", unpriced: true}, {name: "vscode", unpriced: true}},
+				}}},
 			},
 			{
 				// The usage one second before the base window is inside a
 				// window that ends where the base window starts.
 				name: "EarlierWindow", start: start.Add(-time.Hour), end: start,
-				want: []database.ListOrganizationAISpendUsersRow{row(bob, []string{"anthropic-prod"}, []string{"Unknown"}, []string{"claude"}, 99_999, 0, 1, 99_999, 0)},
+				want: report{count: 1, totalCost: 99_999, users: []userSpend{only(bob, "anthropic-prod", "claude", "Unknown", 99_999)}},
 			},
 			{
 				// Usage is attributed by when it was recorded, not by when
@@ -21688,10 +21766,10 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 				// the base window but its usage counts here, alongside bob's
 				// usage at the base window's exclusive end.
 				name: "TokenUsageCreatedAt", start: end, end: end.Add(2 * time.Hour),
-				want: []database.ListOrganizationAISpendUsersRow{
-					row(bob, []string{"anthropic-prod"}, []string{"Unknown"}, []string{"claude"}, 99_999, 0, 2, 100_699, 0),
-					row(carol, []string{"anthropic-prod"}, []string{"cursor"}, []string{"claude"}, 700, 0, 2, 100_699, 0),
-				},
+				want: report{count: 2, totalCost: 100_699, users: []userSpend{
+					only(bob, "anthropic-prod", "claude", "Unknown", 99_999),
+					only(carol, "anthropic-prod", "claude", "cursor", 700),
+				}},
 			},
 		}
 		for _, tc := range cases {
@@ -21702,7 +21780,7 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 				params.PeriodStart, params.PeriodEnd = tc.start, tc.end
 				rows, err := db.ListOrganizationAISpendUsers(ctx, params)
 				require.NoError(t, err)
-				require.Equal(t, tc.want, rows)
+				require.Equal(t, tc.want, collect(rows))
 			})
 		}
 	})
@@ -21714,11 +21792,72 @@ func TestListOrganizationAISpendUsers(t *testing.T) {
 		params.OrganizationID = otherOrg.ID
 		rows, err := db.ListOrganizationAISpendUsers(ctx, params)
 		require.NoError(t, err)
-		require.Equal(t, []database.ListOrganizationAISpendUsersRow{{
-			UserID: bob.ID, Username: bob.Username, Name: bob.Name, AvatarURL: bob.AvatarURL, OrganizationID: otherOrg.ID,
-			CostMicros: 99_999, Providers: []string{"anthropic-prod"}, Clients: []string{"Unknown"}, Models: []string{"claude"}, Count: 1, TotalCostMicros: 99_999,
-		}}, rows)
+		require.Equal(t, report{
+			count: 1, totalCost: 99_999,
+			users: []userSpend{only(bob, "anthropic-prod", "claude", "Unknown", 99_999)},
+		}, collect(rows))
 	})
+}
+
+// TestListOrganizationAISpendUsersProviders checks the provider details on
+// provider rows. It uses its own database because the providers are
+// deployment-wide.
+func TestListOrganizationAISpendUsersProviders(t *testing.T) {
+	t.Parallel()
+	db, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	start := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	org := dbgen.Organization(t, db, database.Organization{})
+	group := dbgen.Group(t, db, database.Group{OrganizationID: org.ID})
+	user := dbgen.User(t, db, database.User{})
+
+	// anthropic-prod was deleted and its name reused, so the live provider
+	// wins. openai-prod is deleted. legacy-prod was never configured.
+	stale := dbgen.AIProvider(t, db, database.AIProvider{
+		Name: "anthropic-prod", Type: database.AIProviderTypeAnthropic,
+		DisplayName: sql.NullString{String: "Old Anthropic", Valid: true}, Icon: "/icon/old.svg",
+	})
+	require.NoError(t, db.DeleteAIProviderByID(ctx, stale.ID))
+	dbgen.AIProvider(t, db, database.AIProvider{
+		Name: "anthropic-prod", Type: database.AIProviderTypeAnthropic,
+		DisplayName: sql.NullString{String: "Anthropic", Valid: true}, Icon: "/icon/claude.svg",
+	})
+	deleted := dbgen.AIProvider(t, db, database.AIProvider{
+		Name: "openai-prod", Type: database.AIProviderTypeOpenai,
+		DisplayName: sql.NullString{String: "OpenAI", Valid: true}, Icon: "/icon/openai.svg",
+	})
+	require.NoError(t, db.DeleteAIProviderByID(ctx, deleted.ID))
+
+	for i, providerName := range []string{"anthropic-prod", "openai-prod", "legacy-prod"} {
+		intc := dbgen.AIBridgeInterception(t, db, database.InsertAIBridgeInterceptionParams{
+			InitiatorID: user.ID, Provider: strings.TrimSuffix(providerName, "-prod"), ProviderName: providerName, Model: "claude", StartedAt: start,
+		}, nil)
+		dbgen.AIBridgeTokenUsage(t, db, database.InsertAIBridgeTokenUsageParams{
+			InterceptionID: intc.ID, CreatedAt: start, EffectiveGroupID: uuid.NullUUID{UUID: group.ID, Valid: true},
+			CostMicros: sql.NullInt64{Int64: int64(300 - i*100), Valid: true},
+		})
+	}
+
+	rows, err := db.ListOrganizationAISpendUsers(ctx, database.ListOrganizationAISpendUsersParams{
+		OrganizationID: org.ID, PeriodStart: start, PeriodEnd: start.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	type provider struct {
+		name, displayName, icon, providerType string
+	}
+	var got []provider
+	for _, row := range rows {
+		if row.Dimension == "provider" {
+			got = append(got, provider{row.DimensionName, row.ProviderDisplayName, row.ProviderIcon, row.ProviderType})
+		}
+	}
+	require.Equal(t, []provider{
+		{name: "anthropic-prod", displayName: "Anthropic", icon: "/icon/claude.svg", providerType: "anthropic"},
+		{name: "openai-prod", displayName: "OpenAI", icon: "/icon/openai.svg", providerType: "openai"},
+		{name: "legacy-prod", displayName: "", icon: "", providerType: ""},
+	}, got)
 }
 
 func TestExportOrganizationAISpend(t *testing.T) {

@@ -611,18 +611,22 @@ LIMIT NULLIF(@limit_opt::int, 0);
 
 -- name: ListOrganizationAISpendUsers :many
 -- Returns one page of per-user AI spend for @organization_id over the
--- [period_start, period_end) window, most expensive first, together with the
--- providers, clients, and models each user spent through and the count and
--- totals over every matching user. It must keep the same joins and predicates as
--- ExportOrganizationAISpend so both report the same token usage.
+-- [period_start, period_end) window, most expensive first. Each user has one
+-- row per provider, model, and client they spent through, and every row
+-- carries the user's spend and the count and totals over every matching user.
+-- It must keep the same joins and predicates as ExportOrganizationAISpend so
+-- both report the same token usage.
 WITH spend AS (
 	SELECT
 		ai.initiator_id AS user_id,
+		ai.provider_name,
+		ai.model,
+		COALESCE(ai.client, 'Unknown') AS client,
+		GROUPING(ai.provider_name) = 0 AS is_provider,
+		GROUPING(ai.model) = 0 AS is_model,
+		GROUPING(COALESCE(ai.client, 'Unknown')) = 0 AS is_client,
 		COALESCE(SUM(tu.cost_micros), 0)::BIGINT AS cost_micros,
-		COUNT(*) FILTER (WHERE tu.cost_micros IS NULL)::BIGINT AS unpriced_usage_count,
-		ARRAY_AGG(DISTINCT ai.provider_name ORDER BY ai.provider_name)::text[] AS providers,
-		ARRAY_AGG(DISTINCT COALESCE(ai.client, 'Unknown') ORDER BY COALESCE(ai.client, 'Unknown'))::text[] AS clients,
-		ARRAY_AGG(DISTINCT ai.model ORDER BY ai.model)::text[] AS models
+		BOOL_OR(tu.cost_micros IS NULL) AS has_unpriced_usage
 	FROM aibridge_token_usages tu
 	JOIN aibridge_interceptions ai ON ai.id = tu.interception_id
 	JOIN groups ON groups.id = tu.effective_group_id
@@ -630,7 +634,17 @@ WITH spend AS (
 		AND tu.created_at >= @period_start::timestamptz
 		AND tu.created_at < @period_end::timestamptz
 		AND CASE
-			WHEN @provider_name::text != '' THEN ai.provider_name = @provider_name::text
+			WHEN COALESCE(cardinality(@user_ids::uuid[]), 0) > 0
+				THEN ai.initiator_id = ANY(@user_ids::uuid[])
+			ELSE true
+		END
+		AND (
+			@group_id::uuid = '00000000-0000-0000-0000-000000000000'::uuid
+			OR tu.effective_group_id = @group_id
+		)
+		AND CASE
+			WHEN @provider_name::text != ''
+				THEN ai.provider_name = @provider_name::text
 			ELSE true
 		END
 		AND CASE
@@ -638,30 +652,102 @@ WITH spend AS (
 			ELSE true
 		END
 		AND CASE
-			WHEN @client::text != '' THEN COALESCE(ai.client, 'Unknown') = @client::text
+			WHEN @client::text != ''
+				THEN COALESCE(ai.client, 'Unknown') = @client::text
 			ELSE true
 		END
-	GROUP BY ai.initiator_id
+	GROUP BY GROUPING SETS (
+		(ai.initiator_id),
+		(ai.initiator_id, ai.provider_name),
+		(ai.initiator_id, ai.model),
+		(ai.initiator_id, COALESCE(ai.client, 'Unknown'))
+	)
+),
+unpriced_models AS (
+	SELECT
+		user_id,
+		COUNT(*)::BIGINT AS unpriced_model_count
+	FROM spend
+	WHERE is_model
+		AND has_unpriced_usage
+		AND model IS NOT NULL
+	GROUP BY user_id
+),
+-- users_page holds one row per user, so the window functions and the page apply
+-- to users rather than to their provider, model, and client rows.
+users_page AS (
+	SELECT
+		spend.user_id,
+		users.username,
+		users.name,
+		users.avatar_url,
+		spend.cost_micros,
+		COALESCE(
+			unpriced_models.unpriced_model_count,
+			0
+		)::BIGINT AS unpriced_model_count,
+		COUNT(*) OVER ()::BIGINT AS count,
+		COALESCE(SUM(spend.cost_micros) OVER (), 0)::BIGINT AS total_cost_micros,
+		BOOL_OR(spend.has_unpriced_usage) OVER () AS total_has_unpriced_usage
+	FROM spend
+	JOIN users ON users.id = spend.user_id
+	LEFT JOIN unpriced_models
+		ON unpriced_models.user_id = spend.user_id
+	WHERE NOT (spend.is_provider OR spend.is_model OR spend.is_client)
+	ORDER BY spend.cost_micros DESC, LOWER(users.username), spend.user_id
+	LIMIT NULLIF(@limit_opt::int, 0)
+	OFFSET @offset_opt::int
 )
 SELECT
-	spend.user_id,
-	users.username,
-	users.name,
-	users.avatar_url,
+	users_page.user_id,
+	users_page.username,
+	users_page.name,
+	users_page.avatar_url,
 	@organization_id::uuid AS organization_id,
-	spend.cost_micros,
-	spend.unpriced_usage_count,
-	spend.providers,
-	spend.clients,
-	spend.models,
-	COUNT(*) OVER ()::BIGINT AS count,
-	COALESCE(SUM(spend.cost_micros) OVER (), 0)::BIGINT AS total_cost_micros,
-	COALESCE(SUM(spend.unpriced_usage_count) OVER (), 0)::BIGINT AS total_unpriced_usage_count
-FROM spend
-JOIN users ON users.id = spend.user_id
-ORDER BY cost_micros DESC, LOWER(users.username), spend.user_id
-LIMIT NULLIF(@limit_opt::int, 0)
-OFFSET @offset_opt::int;
+	users_page.cost_micros,
+	users_page.unpriced_model_count,
+	users_page.count,
+	users_page.total_cost_micros,
+	users_page.total_has_unpriced_usage,
+	(CASE
+		WHEN spend.is_provider THEN 'provider'
+		WHEN spend.is_model THEN 'model'
+		ELSE 'client'
+	END)::text AS dimension,
+	(CASE
+		WHEN spend.is_provider THEN spend.provider_name
+		WHEN spend.is_model THEN spend.model
+		ELSE spend.client
+	END)::text AS dimension_name,
+	COALESCE(providers.display_name, '')::text AS provider_display_name,
+	COALESCE(providers.icon, '')::text AS provider_icon,
+	COALESCE(providers.type::text, '')::text AS provider_type,
+	spend.cost_micros AS dimension_cost_micros,
+	spend.has_unpriced_usage AS dimension_has_unpriced_usage
+FROM users_page
+JOIN spend
+	ON spend.user_id = users_page.user_id
+	AND (spend.is_provider OR spend.is_model OR spend.is_client)
+-- Usage keeps referencing deleted providers, so deleted rows are included and
+-- a live row wins when a name was reused, like GetAIProviderFilterOptions.
+LEFT JOIN LATERAL (
+	SELECT ai_providers.display_name, ai_providers.icon, ai_providers.type
+	FROM ai_providers
+	WHERE ai_providers.name = spend.provider_name
+	ORDER BY ai_providers.deleted ASC, ai_providers.updated_at DESC
+	LIMIT 1
+) AS providers ON spend.is_provider
+ORDER BY
+	users_page.cost_micros DESC,
+	LOWER(users_page.username),
+	users_page.user_id,
+	CASE
+		WHEN spend.is_provider THEN 1
+		WHEN spend.is_model THEN 2
+		ELSE 3
+	END,
+	spend.cost_micros DESC,
+	dimension_name ASC;
 
 -- name: GetOrganizationAISpendPerDay :many
 -- Returns the AI spend in @organization_id for every UTC day in the
